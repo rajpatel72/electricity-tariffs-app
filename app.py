@@ -1,62 +1,104 @@
 import streamlit as st
 import pandas as pd
-import re
+import re, io
 
-st.title("⚡ Flexible Electricity Tariff Comparator")
+st.title("⚡ Flexible Electricity Tariff Comparator (per-sheet mapping)")
 
-def normalize_text(s):
-    if not isinstance(s, str):
-        return ""
+def normalize_text(s: str) -> str:
     return re.sub(r"[\s,._-]", "", str(s)).lower()
 
-uploaded_files = st.file_uploader("Upload Excel files", type=["xlsx"], accept_multiple_files=True)
+def excel_file(uploaded_file):
+    """Return a fresh ExcelFile each time (avoids stale pointer)."""
+    return pd.ExcelFile(io.BytesIO(uploaded_file.getvalue()))
+
+def read_sheet(uploaded_file, sheet_name):
+    """Read a specific sheet from a fresh buffer."""
+    return pd.read_excel(io.BytesIO(uploaded_file.getvalue()), sheet_name=sheet_name)
+
+uploaded_files = st.file_uploader(
+    "Upload Excel files", type=["xlsx"], accept_multiple_files=True
+)
 
 if uploaded_files:
-    tariff_input = st.text_input("Enter tariff code (e.g. D1DD1)").strip().lower().replace(",", "").replace(" ", "")
+    # One tariff to search across all files/sheets (normalized)
+    tariff_input_raw = st.text_input("Enter tariff code (e.g. D1DD1)")
+    tariff_input = normalize_text(tariff_input_raw) if tariff_input_raw else ""
+
     results = []
 
-    for file in uploaded_files:
-        st.subheader(f"📂 Settings for `{file.name}`")
+    for uf in uploaded_files:
+        st.markdown(f"### 📂 Settings for `{uf.name}`")
 
-        # Load file and show available sheets
-        xls = pd.ExcelFile(file)
-        sheet_name = st.selectbox(f"Select sheet in {file.name}", xls.sheet_names, key=file.name)
+        # 1) Pick SHEET (from this file only)
+        xls = excel_file(uf)
+        sheet_key = f"sheet::{uf.name}"
+        sheet_name = st.selectbox(
+            f"Select sheet in {uf.name}",
+            options=xls.sheet_names,
+            key=sheet_key
+        )
 
-        # Read the SELECTED sheet only
-        df = pd.read_excel(file, sheet_name=sheet_name)
+        # 2) Read the SELECTED sheet only (fresh buffer)
+        df = read_sheet(uf, sheet_name)
 
-        # Preview
-        st.write("Preview of data:")
+        st.caption("Preview of selected sheet")
         st.dataframe(df.head())
 
-        # Tariff column selector (now from selected sheet only)
-        tariff_col = st.selectbox(f"Select tariff column in {file.name} ({sheet_name})", df.columns, key=file.name+"_tariff")
+        # 3) Pick columns FROM THE SELECTED SHEET ONLY
+        # Use keys that depend on file + sheet so widgets refresh when sheet changes
+        tariff_key = f"tariff_col::{uf.name}::{sheet_name}"
+        rates_key  = f"rate_cols::{uf.name}::{sheet_name}"
 
-        # Rate columns selector (from selected sheet only)
-        rate_cols = st.multiselect(f"Select rate columns in {file.name} ({sheet_name})", df.columns, key=file.name+"_rates")
+        tariff_col = st.selectbox(
+            f"Select tariff column in {uf.name} → {sheet_name}",
+            options=df.columns.tolist(),
+            key=tariff_key
+        )
 
-        # Process search
+        rate_cols = st.multiselect(
+            f"Select rate columns in {uf.name} → {sheet_name}",
+            options=df.columns.tolist(),
+            key=rates_key
+        )
+
+        # 4) If a tariff is provided, find it in this sheet (tolerant to commas/spaces/case)
         if tariff_input:
-            df["__norm_tariff__"] = df[tariff_col].astype(str).apply(normalize_text)
+            try:
+                norm = df[tariff_col].astype(str).apply(normalize_text)
+                matches = df[norm == tariff_input]
+                if not matches.empty:
+                    row = matches.iloc[0]
+                    out = {
+                        "Retailer": uf.name,
+                        "Sheet": sheet_name,
+                        "Tariff": row[tariff_col],
+                    }
+                    for c in rate_cols:
+                        out[c] = row.get(c, None)
+                    results.append(out)
+                else:
+                    st.warning(f"No matching tariff `{tariff_input_raw}` found in **{uf.name} → {sheet_name}**.")
+            except Exception as e:
+                st.error(f"Error searching in {uf.name} → {sheet_name}: {e}")
 
-            if tariff_input in df["__norm_tariff__"].values:
-                row = df[df["__norm_tariff__"] == tariff_input].iloc[0]
-                normalized_row = {"Retailer": file.name, "Sheet": sheet_name, "Tariff": row[tariff_col]}
-
-                for c in rate_cols:
-                    normalized_row[c] = row[c]
-
-                results.append(normalized_row)
-            else:
-                st.warning(f"No matching tariff `{tariff_input}` found in {file.name} ({sheet_name})")
-
-    # Final comparison table
+    # 5) Combined comparison table
     if results:
-        st.subheader("📊 Tariff Comparison Table")
-        results_df = pd.DataFrame(results)
-        st.dataframe(results_df)
+        st.markdown("## 📊 Tariff Comparison Table")
+        res_df = pd.DataFrame(results)
 
-        # Optional chart view
-        if st.checkbox("Show chart comparison"):
-            melted = results_df.melt(id_vars=["Retailer", "Tariff"], var_name="Rate Type", value_name="Value")
-            st.bar_chart(melted, x="Rate Type", y="Value", color="Retailer")
+        # Move identifying columns to the front
+        id_cols = [c for c in ["Retailer", "Sheet", "Tariff"] if c in res_df.columns]
+        other_cols = [c for c in res_df.columns if c not in id_cols]
+        res_df = res_df[id_cols + other_cols]
+
+        st.dataframe(res_df)
+
+        # Optional chart
+        if st.checkbox("Show bar chart for selected rate columns"):
+            if other_cols:
+                melted = res_df.melt(id_vars=id_cols, var_name="Rate Type", value_name="Value")
+                # Try numeric conversion where possible
+                melted["Value"] = pd.to_numeric(melted["Value"], errors="coerce")
+                st.bar_chart(melted.dropna(subset=["Value"]), x="Rate Type", y="Value", color="Retailer")
+            else:
+                st.info("Pick at least one rate column above to chart.")
