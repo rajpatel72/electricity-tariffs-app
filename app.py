@@ -18,25 +18,26 @@ if uploaded_files:
     for file in uploaded_files:
         st.subheader(f"📂 Settings for `{file.name}`")
 
-        # Explore sheets
+        # Load file and show available sheets
         xls = pd.ExcelFile(file)
         sheet_name = st.selectbox(f"Select sheet in {file.name}", xls.sheet_names, key=file.name)
 
+        # Read the SELECTED sheet only
         df = pd.read_excel(file, sheet_name=sheet_name)
 
         # Preview
         st.write("Preview of data:")
         st.dataframe(df.head())
 
-        # User selects tariff column
-        tariff_col = st.selectbox(f"Select tariff column in {file.name}", df.columns, key=file.name+"_tariff")
+        # Tariff column selector (now from selected sheet only)
+        tariff_col = st.selectbox(f"Select tariff column in {file.name} ({sheet_name})", df.columns, key=file.name+"_tariff")
 
-        # User selects rate columns
-        rate_cols = st.multiselect(f"Select rate columns in {file.name}", df.columns, key=file.name+"_rates")
+        # Rate columns selector (from selected sheet only)
+        rate_cols = st.multiselect(f"Select rate columns in {file.name} ({sheet_name})", df.columns, key=file.name+"_rates")
 
         # Process search
         if tariff_input:
-            df["__norm_tariff__"] = df[tariff_col].astype(str).str.lower().str.replace(r"[\s,]", "", regex=True)
+            df["__norm_tariff__"] = df[tariff_col].astype(str).apply(normalize_text)
 
             if tariff_input in df["__norm_tariff__"].values:
                 row = df[df["__norm_tariff__"] == tariff_input].iloc[0]
@@ -47,8 +48,9 @@ if uploaded_files:
 
                 results.append(normalized_row)
             else:
-                st.warning(f"No matching tariff `{tariff_input}` found in {file.name}")
+                st.warning(f"No matching tariff `{tariff_input}` found in {file.name} ({sheet_name})")
 
+    # Final comparison table
     if results:
         st.subheader("📊 Tariff Comparison Table")
         results_df = pd.DataFrame(results)
