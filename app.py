@@ -1,47 +1,72 @@
 import streamlit as st
 import pandas as pd
+import re
 
-st.title("⚡ Electricity Tariff Comparison (Australia)")
+st.title("⚡ Smart Electricity Tariff Comparator")
 
-# Upload multiple files
+# Define synonyms for rate columns
+COLUMN_SYNONYMS = {
+    "peak": ["peak", "peak usage", "peak_rate", "pk1", "peak_block1_rate"],
+    "shoulder": ["shoulder", "shoulder_rate", "shoulder_block1_rate"],
+    "offpeak": ["off peak", "offpeak", "off_peak", "op", "offpeak_block1_rate"],
+    "daily": ["daily supply charge", "daily charge", "service_to_property"],
+    "controlled_load1": ["cl1", "controlled load 1", "controlled_load1_block1_rate"],
+    "controlled_load2": ["cl2", "controlled load 2", "controlled_load2"],
+    "demand1": ["demand1", "demand 1", "demand_1_rate"],
+    "demand2": ["demand2", "demand 2", "demand_2_rate"]
+}
+
+def normalize_text(s):
+    if not isinstance(s, str):
+        return ""
+    return re.sub(r"[\s,._-]", "", s).lower()
+
+def match_column(col_name):
+    """Map raw column name to a standard category"""
+    cname = normalize_text(col_name)
+    for standard, options in COLUMN_SYNONYMS.items():
+        for opt in options:
+            if opt.replace(" ", "") in cname:
+                return standard
+    return None
+
+# Upload files
 uploaded_files = st.file_uploader("Upload Excel files", type=["xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
-    comparison_data = {}
+    # User enters one tariff code to search across all
+    tariff_input = st.text_input("Enter tariff code to search (e.g. d1dd1)").lower().replace(" ", "").replace(",", "")
 
-    for file in uploaded_files:
-        st.subheader(f"⚙️ Settings for {file.name}")
+    if tariff_input:
+        results = []
 
-        # Load Excel
-        xls = pd.ExcelFile(file)
-        sheet_choice = st.selectbox(f"Select Sheet for {file.name}", xls.sheet_names, key=file.name+"_sheet")
+        for file in uploaded_files:
+            xls = pd.ExcelFile(file)
+            for sheet in xls.sheet_names:
+                try:
+                    df = pd.read_excel(file, sheet_name=sheet)
+                except:
+                    continue
 
-        df = pd.read_excel(file, sheet_name=sheet_choice)
-        st.write("Preview", df.head())
+                # Normalize tariff column candidates
+                for col in df.columns:
+                    df[col] = df[col].astype(str)
+                    df["__norm_tariff__"] = df[col].str.lower().str.replace(r"[\s,]", "", regex=True)
 
-        # Pick tariff column
-        column_choice = st.selectbox(f"Select Tariff Column for {file.name}", df.columns, key=file.name+"_col")
+                    if tariff_input in df["__norm_tariff__"].values:
+                        # Map useful columns
+                        row = df[df["__norm_tariff__"] == tariff_input].iloc[0]
+                        normalized_row = {"Retailer": file.name, "Sheet": sheet, "Tariff": row[col]}
 
-        # Normalize tariffs (lowercase, remove spaces/commas)
-        df["__tariff_normalized__"] = df[column_choice].astype(str).str.lower().str.replace(r"[\s,]", "", regex=True)
+                        for c in df.columns:
+                            mapped = match_column(c)
+                            if mapped:
+                                normalized_row[mapped] = row[c]
 
-        # Let user pick which tariff to compare
-        tariff_choice = st.selectbox(f"Select tariff from {file.name}", df["__tariff_normalized__"].unique(), key=file.name+"_tariff")
+                        results.append(normalized_row)
 
-        # Save filtered data
-        comparison_data[file.name] = df[df["__tariff_normalized__"] == tariff_choice]
-
-    # --- Show Comparison ---
-    if comparison_data:
-        st.subheader("📊 Tariff Comparison Table")
-
-        # Combine results into one table
-        combined = pd.DataFrame()
-        for retailer, data in comparison_data.items():
-            # Take only numeric columns + keep tariff name
-            numeric_cols = data.select_dtypes(include=["number"]).copy()
-            numeric_cols["Retailer"] = retailer
-            combined = pd.concat([combined, numeric_cols], axis=0)
-
-        if not combined.empty:
-            st.write(combined)
+        if results:
+            st.subheader("📊 Comparison Table")
+            st.write(pd.DataFrame(results))
+        else:
+            st.warning("No matching tariffs found in uploaded files.")
